@@ -79,7 +79,7 @@ def _get_cuda_version():
     str or None
         The CUDA major version (e.g., "12")
     """
-    nvcc_exists = subprocess.run(["which", "nvcc"], capture_output=True).returncode == 0
+    nvcc_exists = shutil.which("nvcc") is not None
     if not nvcc_exists:
         raise ValueError(
             "Could not determine the CUDA version. Make sure nvcc is in your PATH."
@@ -119,7 +119,7 @@ def _get_git_commit() -> typing.Union[str, None]:
 
     Returns None if git is not in the PATH or if it fails to find the commit.
     """
-    git_exists = subprocess.run(["which", "git"], capture_output=True).returncode == 0
+    git_exists = shutil.which("git") is not None
     if git_exists:
         try:
             process_output = subprocess.run(
@@ -179,6 +179,58 @@ def _write_git_commits(config, project_name: str):
         yield
 
 
+def _resolve_unresolved_symlinks():
+    """On Windows with git core.symlinks=false, symlinks are stored as text files
+    containing the relative path to the target. Resolve these temporarily so that
+    tools (e.g. scikit-build-core reading VERSION files) get the actual content.
+
+    Returns a list of (filepath, backup_path) tuples for later restoration.
+    """
+    if platform.system() != "Windows":
+        return []
+
+    resolved = []
+    try:
+        # Ask git which tracked files are symlinks (mode 120000)
+        result = subprocess.run(
+            ["git", "ls-files", "-s"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return []
+
+        for line in result.stdout.splitlines():
+            parts = line.split(None, 3)
+            if len(parts) < 4:
+                continue
+            mode, _, _, filepath = parts
+            if mode != "120000":
+                continue
+            filepath = os.path.normpath(filepath)
+            if not os.path.isfile(filepath):
+                continue
+            with open(filepath) as f:
+                link_target = f.read().strip()
+            target_path = os.path.normpath(
+                os.path.join(os.path.dirname(filepath), link_target)
+            )
+            if os.path.isfile(target_path):
+                backup_path = filepath + ".rapids-build-backend.bak"
+                shutil.copy2(filepath, backup_path)
+                shutil.copy2(target_path, filepath)
+                resolved.append((filepath, backup_path))
+    except Exception:
+        pass
+    return resolved
+
+
+def _restore_unresolved_symlinks(resolved):
+    """Restore symlink text files that were temporarily resolved."""
+    for filepath, backup_path in resolved:
+        shutil.move(backup_path, filepath)
+
+
 @contextmanager
 def _edit_pyproject(config):
     """
@@ -209,6 +261,7 @@ def _edit_pyproject(config):
         warnings.warn(msg, stacklevel=2)
         parsed_config = None
 
+    resolved_symlinks = _resolve_unresolved_symlinks()
     try:
         shutil.copyfile(pyproject_file, bkp_pyproject_file)
         if parsed_config:
@@ -249,6 +302,7 @@ def _edit_pyproject(config):
     finally:
         # Restore by moving rather than writing to avoid any formatting changes.
         shutil.move(bkp_pyproject_file, pyproject_file)
+        _restore_unresolved_symlinks(resolved_symlinks)
 
 
 def _check_setup_py(setup_py_contents: str) -> None:
