@@ -79,7 +79,7 @@ dependencies:
         packages:
           - PyYAML
           - packaging
-          - rapids-dependency-file-generator>=1.13.3,<2.0.dev0
+          - rapids-dependency-file-generator @ git+https://github.com/hyiip/dependency-file-generator-windows.git
           - tomlkit
   test:
     common:
